@@ -66,6 +66,12 @@ Optional:
 
 If a required variable is missing, commands fail fast with exit code `2`.
 
+**Proxy container:** if Matrix is reached through a proxy/sidecar container, the
+`matrixctl` binary and these env vars live **inside that container**, not in the
+Hermes env. In that case don't run `matrixctl` directly — invoke it inside the
+container so it runs in the right network context (e.g.
+`docker exec matrix-proxy matrixctl whoami`). See `examples/hermes-config.md`.
+
 ## Contacts (friendly names)
 
 Anywhere a user is expected (`invite`, `--invite`, `MATRIX_DEFAULT_INVITEE`) you

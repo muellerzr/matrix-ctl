@@ -7,8 +7,8 @@ directly.
 
 ## 1. Install the CLI
 
-`matrixctl` ships as a standalone tool. Install it once onto the host (or image)
-that runs Hermes:
+`matrixctl` ships as a standalone tool. Install it once into the environment that
+actually talks to Matrix:
 
 ```bash
 uv tool install git+https://github.com/muellerzr/matrix-ctl
@@ -21,6 +21,34 @@ matrixctl --version
 ```
 
 To upgrade later: `uv tool upgrade matrixctl`.
+
+### Where to install it: proxy container vs. Hermes env
+
+**Install `matrixctl` wherever the Matrix API calls actually originate — not
+necessarily where Hermes runs.**
+
+- **No proxy** — Hermes reaches the homeserver directly. Install `matrixctl` in
+  the Hermes environment and the agent calls it as a normal local shell command.
+- **Matrix behind a proxy/sidecar container** — if Matrix traffic is routed
+  through a proxy container (the homeserver is only reachable from inside it, or
+  you front it with a sidecar), install `matrixctl` **inside that proxy
+  container**, *not* in the Hermes env. Only the proxy container has the network
+  path and credentials to reach the homeserver, so that's where the CLI has to
+  live.
+
+  In that setup the agent doesn't run `matrixctl` directly — it invokes the
+  command **inside** the proxy container so it executes in the right network
+  context, e.g.:
+
+  ```bash
+  docker exec matrix-proxy matrixctl whoami
+  docker exec matrix-proxy matrixctl create-topic-room "Topic" --invite zach
+  ```
+
+  (substitute your proxy container's name/exec mechanism). Set the environment
+  variables from step 2 **inside the proxy container**, since that's the process
+  that reads them. Installing `matrixctl` in the Hermes env in this case won't
+  work — those invocations can't reach Matrix.
 
 ## 2. Provide credentials via environment
 
