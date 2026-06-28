@@ -61,7 +61,12 @@ Optional:
   it is resolved automatically via `whoami` when needed.
 - `MATRIX_DEFAULT_INVITEE` — a user id invited by default to newly created
   rooms when no `--invite` is given.
-- `MATRIX_TIMEOUT_SECONDS` — HTTP timeout in seconds (default `30`).
+- `MATRIX_TIMEOUT_SECONDS` — request timeout in seconds (default `30`); applies
+  to REST calls and to Hermes IPC waits.
+- `MATRIXCTL_TRANSPORT` — `auto` (default), `rest`, or `hermes`. See
+  [Transport modes](#transport-modes).
+- `MATRIXCTL_HERMES_SOCKET` — path to the Hermes IPC gateway socket
+  (default `/run/matrixctl/hermes.sock`).
 
 Tokens are never printed.
 
@@ -123,27 +128,125 @@ matrixctl create-topic-room "Topic Name" \
   --welcome-message "Welcome message"
 ```
 
-Returns JSON including the `room_id`. When `--encrypted` is set, the welcome
-message is **not** sent by matrixctl (see Encryption); it is returned as
-`pending_welcome_message` for an E2E-capable client to send instead.
+Returns JSON including the `room_id`. Behaviour with `--encrypted` depends on the
+transport (see [Transport modes](#transport-modes)): under **Hermes** the welcome
+message is sent encrypted and you get a `welcome_event_id`; under **REST** it
+cannot be encrypted, so it is returned as `pending_welcome_message` for an
+E2E-capable client to send instead.
 
-## Encryption
+## Transport modes
 
-matrixctl uses token-only REST and has **no end-to-end crypto**. It can *enable*
-encryption on a room (`--encrypted` writes the `m.room.encryption` state event)
-and do all room administration, but it **cannot encrypt message content**.
-Encrypted messaging is expected to go through an E2E-capable client such as
-Hermes's mautrix adapter. To stay safe matrixctl never shares or touches that
-adapter's crypto store.
+matrixctl can reach Matrix two ways. Pick one with `--transport` (or
+`MATRIXCTL_TRANSPORT`); the JSON output and exit codes are identical either way.
 
-As a result:
+| Mode | What it does | E2E encryption |
+| --- | --- | --- |
+| `rest` | Direct Client-Server REST with access-token auth (the original behaviour). | **No** — cannot encrypt message bodies. |
+| `hermes` | Forwards every operation to a running Hermes Matrix adapter over a Unix socket; messages go out through the adapter's live mautrix/Olm client. Fails clearly if the gateway isn't reachable. | **Yes** — handled by Hermes. |
+| `auto` *(default)* | Uses Hermes when its socket is live; otherwise falls back to REST. | Yes when the gateway is up, else No. |
+
+```bash
+matrixctl --transport rest   send "!room:id" "plain"     # direct REST
+matrixctl --transport hermes send "!room:id" "secret"    # via Hermes (E2E)
+matrixctl send "!room:id" "hi"                            # auto
+```
+
+**REST mode cannot perform E2E encryption.** It can *enable* encryption on a room
+(`--encrypted` writes the `m.room.encryption` state event) and do all room
+administration, but it cannot encrypt message content. So under REST:
 
 - `send` into an encrypted room is **refused** (exit code `3`) unless you pass
-  `--allow-plaintext`, which writes the message UNENCRYPTED (clients will flag
-  it). Use this only when you really mean to.
-- `create-topic-room --encrypted` with a `--welcome-message` returns the text as
-  `pending_welcome_message` instead of sending it, so the caller can send it
-  encrypted.
+  `--allow-plaintext`, which writes the message UNENCRYPTED (clients flag it).
+- `create-topic-room --encrypted --welcome-message …` returns the text as
+  `pending_welcome_message` instead of sending it.
+
+**Hermes mode delegates to the already-running mautrix/Olm client**, so it never
+hits these limits: `send` into an encrypted room just works (the gateway
+encrypts), and `--allow-plaintext` is unnecessary and ignored.
+
+## Hermes E2E integration
+
+The architecture is a one-way forward from matrixctl to a long-running gateway:
+
+```
+matrixctl  →  Unix socket  →  Hermes Matrix adapter  →  live mautrix client
+              (JSON lines)     (holds Olm/Megolm state)  →  homeserver
+```
+
+matrixctl speaks a small versioned JSON-lines protocol over the socket (one
+request/response per invocation, correlated by a UUID). Each CLI command maps to
+one gateway action — `whoami`, `send`, `create_room`, `create_topic_room`,
+`invite`, `leave`, `forget`, `set_room_name`, `set_room_topic`,
+`set_display_name`, `set_room_display_name`. `create_topic_room` is a single
+atomic action on the gateway side (create + invite + enable encryption + send the
+welcome encrypted), so a half-built room can't result from one call.
+
+To use it, point matrixctl at the gateway socket and select the transport:
+
+```bash
+export MATRIXCTL_TRANSPORT=hermes
+export MATRIXCTL_HERMES_SOCKET=/run/matrixctl/hermes.sock
+matrixctl send "!room:id" "encrypted message"
+```
+
+> The Hermes-side IPC gateway (the socket server and adapter wiring) is a
+> separate component and is **not** part of this package. matrixctl only
+> implements the client half of the protocol.
+
+## Docker proxy usage
+
+When Matrix is reached through a proxy/sidecar container, install matrixctl and
+set the transport env vars **inside that container** (it's where the network path
+and the gateway socket live), then invoke it from the host:
+
+```bash
+# inside the proxy image:
+#   MATRIXCTL_TRANSPORT=hermes
+#   MATRIXCTL_HERMES_SOCKET=/run/matrixctl/hermes.sock
+
+docker exec hermes-matrix-proxy matrixctl --transport hermes \
+  send "!room:server" "encrypted test"
+```
+
+See [`examples/hermes-config.md`](examples/hermes-config.md) for the full proxy
+vs. host install discussion.
+
+## Security model
+
+- **The crypto database is never shared between processes.** matrixctl has no
+  crypto and never opens, reads, or writes the adapter's Olm/Megolm store — only
+  the Hermes gateway process touches it. matrixctl just sends JSON over a socket.
+- **No silent plaintext into encrypted rooms.** REST refuses (exit `3`) unless
+  you explicitly pass `--allow-plaintext`; Hermes encrypts. There is no path that
+  quietly leaks plaintext into an encrypted room.
+- **Bounded, validated IPC.** Responses are size-capped and time-bounded, the
+  protocol version is checked, and each reply must match the request's UUID
+  before it's trusted.
+- **No symlink following / stale sockets.** The socket path is `lstat`-checked and
+  must be a real socket (a symlink there is rejected); a stale socket (file
+  present, nothing listening) is treated as unavailable — `auto` falls back to
+  REST, `hermes` fails clearly.
+- **Tokens are never printed** by matrixctl in any mode.
+
+## Troubleshooting
+
+- **`transport 'hermes' was requested but the IPC socket … is not available`**
+  (exit `2`) — the gateway isn't running or `MATRIXCTL_HERMES_SOCKET` points at
+  the wrong path. Start the Hermes adapter with its IPC server enabled, or use
+  `--transport rest` / `auto`.
+- **`auto` used REST when you expected Hermes** — the socket was missing, stale,
+  or a symlink. Check it exists and is a live socket
+  (`test -S "$MATRIXCTL_HERMES_SOCKET"`), and that nothing replaced it with a
+  link.
+- **`send` returns exit `3` ("refused … encrypted")** — you're on REST. Switch to
+  `--transport hermes` to send encrypted, or pass `--allow-plaintext` to send
+  unencrypted on purpose.
+- **`Hermes gateway returned invalid JSON` / `… exceeded size limit` /
+  `response id did not match`** (exit `1`) — a protocol-level problem with the
+  gateway; check that its matrixctl IPC version matches this client.
+- **Permission denied connecting to the socket** — the socket is `0600` and owned
+  by the gateway user; run matrixctl as that user (e.g. inside the proxy
+  container) rather than from a different account.
 
 ## Exit codes
 
@@ -190,10 +293,12 @@ Exit codes). Tokens are never printed. Exact shapes per command:
 - `bot_room_display_name` appears only if `--bot-room-display-name` was given.
 - The welcome message is reported under exactly one of two keys, and **only**
   if `--welcome-message` was given:
-  - **`pending_welcome_message`** — room is encrypted; matrixctl did **not**
-    send it. The caller (Hermes/mautrix) must send this text encrypted.
-  - **`welcome_event_id`** — room is unencrypted; matrixctl already sent it,
-    this is the resulting event id.
+  - **`welcome_event_id`** — the message was sent; this is its event id. Happens
+    for unencrypted rooms on any transport, and for **encrypted** rooms on the
+    Hermes transport (sent encrypted by the gateway).
+  - **`pending_welcome_message`** — the message was **not** sent because the REST
+    transport can't encrypt and the room is encrypted. The caller (Hermes/
+    mautrix) must send this text encrypted. Only appears under `--transport rest`.
 
   So Hermes should: check for `pending_welcome_message`; if present, send that
   text into `room_id` via mautrix. If `welcome_event_id` is present instead,

@@ -2,6 +2,10 @@
 
 Outputs JSON on stdout, errors on stderr, exit 0 on success / non-zero on
 failure. Designed to be called non-interactively by an agent.
+
+Every command runs over a *transport* (see :mod:`matrixctl.transport`): plain
+REST, or the Hermes IPC gateway for end-to-end encrypted operation. The output
+shape and exit codes are identical either way.
 """
 
 from __future__ import annotations
@@ -13,8 +17,9 @@ import sys
 from typing import Any
 
 from . import __version__
-from .client import ConfigError, EncryptedRoomError, MatrixClient, MatrixError
+from .client import ConfigError, EncryptedRoomError, MatrixError
 from .contacts import ContactError, load_contacts, resolve
+from .transport import select_transport
 
 
 def _print_json(data: Any) -> None:
@@ -27,107 +32,88 @@ def _err(message: str) -> None:
 
 
 # -- command handlers ------------------------------------------------------
-# Each handler takes (client, args) and returns the JSON-able result to print.
+# Each handler takes (transport, args) and returns the JSON-able result to
+# print. Handlers are transport-agnostic: the transport hides REST-vs-Hermes.
 
 
-def cmd_whoami(client: MatrixClient, args: argparse.Namespace) -> Any:
-    return client.whoami()
+def cmd_whoami(transport: Any, args: argparse.Namespace) -> Any:
+    return transport.whoami()
 
 
-def cmd_create_room(client: MatrixClient, args: argparse.Namespace) -> Any:
-    result = client.create_room(
-        args.name,
+def cmd_create_room(transport: Any, args: argparse.Namespace) -> Any:
+    result = transport.create_room(
+        name=args.name,
         topic=args.topic,
         invite=_invitees(args.invite),
-        encrypted=args.encrypted,
+        encrypted=bool(args.encrypted),
     )
     return {"room_id": result["room_id"]}
 
 
-def cmd_invite(client: MatrixClient, args: argparse.Namespace) -> Any:
+def cmd_invite(transport: Any, args: argparse.Namespace) -> Any:
     user_id = resolve(args.user_id, load_contacts())
-    client.invite(args.room_id, user_id)
+    transport.invite(args.room_id, user_id)
     return {"room_id": args.room_id, "invited": user_id}
 
 
-def cmd_send(client: MatrixClient, args: argparse.Namespace) -> Any:
-    if not args.allow_plaintext and client.is_room_encrypted(args.room_id):
+def cmd_send(transport: Any, args: argparse.Namespace) -> Any:
+    # Never silently send plaintext into an encrypted room. A transport that
+    # encrypts (Hermes) handles this upstream; a plaintext one (REST) must
+    # refuse unless the caller explicitly opts into an unencrypted send.
+    if (
+        not transport.encrypts
+        and not args.allow_plaintext
+        and transport.is_room_encrypted(args.room_id)
+    ):
         raise EncryptedRoomError(args.room_id)
-    result = client.send_message(args.room_id, args.message)
+    result = transport.send(args.room_id, args.message)
     return {"room_id": args.room_id, "event_id": result.get("event_id")}
 
 
-def cmd_leave(client: MatrixClient, args: argparse.Namespace) -> Any:
-    client.leave(args.room_id)
+def cmd_leave(transport: Any, args: argparse.Namespace) -> Any:
+    transport.leave(args.room_id)
     return {"room_id": args.room_id, "left": True}
 
 
-def cmd_forget(client: MatrixClient, args: argparse.Namespace) -> Any:
-    client.forget(args.room_id)
+def cmd_forget(transport: Any, args: argparse.Namespace) -> Any:
+    transport.forget(args.room_id)
     return {"room_id": args.room_id, "forgotten": True}
 
 
-def cmd_set_room_name(client: MatrixClient, args: argparse.Namespace) -> Any:
-    result = client.set_room_name(args.room_id, args.name)
+def cmd_set_room_name(transport: Any, args: argparse.Namespace) -> Any:
+    result = transport.set_room_name(args.room_id, args.name)
     return {"room_id": args.room_id, "event_id": result.get("event_id")}
 
 
-def cmd_set_room_topic(client: MatrixClient, args: argparse.Namespace) -> Any:
-    result = client.set_room_topic(args.room_id, args.topic)
+def cmd_set_room_topic(transport: Any, args: argparse.Namespace) -> Any:
+    result = transport.set_room_topic(args.room_id, args.topic)
     return {"room_id": args.room_id, "event_id": result.get("event_id")}
 
 
-def cmd_set_display_name(client: MatrixClient, args: argparse.Namespace) -> Any:
-    client.set_display_name(args.display_name)
-    return {"user_id": client.user_id(), "displayname": args.display_name}
+def cmd_set_display_name(transport: Any, args: argparse.Namespace) -> Any:
+    transport.set_display_name(args.display_name)
+    return {"user_id": transport.user_id(), "displayname": args.display_name}
 
 
-def cmd_set_room_display_name(
-    client: MatrixClient, args: argparse.Namespace
-) -> Any:
-    result = client.set_room_display_name(args.room_id, args.display_name)
+def cmd_set_room_display_name(transport: Any, args: argparse.Namespace) -> Any:
+    result = transport.set_room_display_name(args.room_id, args.display_name)
     return {
         "room_id": args.room_id,
-        "user_id": client.user_id(),
+        "user_id": transport.user_id(),
         "displayname": args.display_name,
         "event_id": result.get("event_id"),
     }
 
 
-def cmd_create_topic_room(
-    client: MatrixClient, args: argparse.Namespace
-) -> Any:
-    invitees = _invitees(args.invite)
-    result = client.create_room(
-        args.name,
+def cmd_create_topic_room(transport: Any, args: argparse.Namespace) -> Any:
+    return transport.create_topic_room(
+        name=args.name,
         topic=args.topic,
-        invite=invitees,
-        encrypted=args.encrypted,
+        invite=_invitees(args.invite),
+        encrypted=bool(args.encrypted),
+        bot_room_display_name=args.bot_room_display_name,
+        welcome_message=args.welcome_message,
     )
-    room_id = result["room_id"]
-
-    out: dict[str, Any] = {
-        "room_id": room_id,
-        "name": args.name,
-        "encrypted": bool(args.encrypted),
-        "invited": invitees,
-    }
-
-    if args.bot_room_display_name:
-        client.set_room_display_name(room_id, args.bot_room_display_name)
-        out["bot_room_display_name"] = args.bot_room_display_name
-
-    if args.welcome_message:
-        # matrixctl has no crypto, so it must not write plaintext into an
-        # encrypted room. Hand the message back for Hermes/mautrix to send
-        # encrypted; only send it directly when the room is unencrypted.
-        if args.encrypted:
-            out["pending_welcome_message"] = args.welcome_message
-        else:
-            sent = client.send_message(room_id, args.welcome_message)
-            out["welcome_event_id"] = sent.get("event_id")
-
-    return out
 
 
 def _invitees(explicit: list[str] | None) -> list[str]:
@@ -147,7 +133,7 @@ def _invitees(explicit: list[str] | None) -> list[str]:
     return [resolve(value, contacts) for value in raw]
 
 
-def cmd_contacts(client: MatrixClient, args: argparse.Namespace) -> Any:
+def cmd_contacts(transport: Any, args: argparse.Namespace) -> Any:
     return {"contacts": load_contacts()}
 
 
@@ -160,6 +146,16 @@ def build_parser() -> argparse.ArgumentParser:
         description="Non-interactive CLI for automating Matrix.",
     )
     parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument(
+        "--transport",
+        choices=["auto", "rest", "hermes"],
+        default=None,
+        help=(
+            "How to reach Matrix: 'rest' (direct, no E2E), 'hermes' (require the "
+            "Hermes IPC gateway for E2E), or 'auto' (Hermes if its socket is "
+            "live, else REST). Defaults to $MATRIXCTL_TRANSPORT or 'auto'."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("whoami", help="Show the authenticated user id.")
@@ -193,7 +189,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--allow-plaintext",
         action="store_true",
-        help="Send even if the room is encrypted (message goes UNENCRYPTED).",
+        help=(
+            "On the REST transport, send even if the room is encrypted (message "
+            "goes UNENCRYPTED). Ignored on the Hermes transport, which always "
+            "encrypts."
+        ),
     )
     p.set_defaults(func=cmd_send)
 
@@ -258,10 +258,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if getattr(args, "needs_client", True):
-            with MatrixClient.from_env() as client:
-                result = args.func(client, args)
+            with select_transport(args) as transport:
+                result = args.func(transport, args)
         else:
-            # Purely local command (e.g. contacts) — no homeserver needed.
+            # Purely local command (e.g. contacts) — no transport needed.
             result = args.func(None, args)
     except (ConfigError, ContactError) as exc:
         _err(str(exc))
