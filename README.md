@@ -1,5 +1,13 @@
 # matrixctl
 
+```bash
+uv tool install git+https://github.com/muellerzr/matrix-ctl   # installs `matrixctl`
+export MATRIX_HOMESERVER="https://matrix.example.org" MATRIX_ACCESS_TOKEN="<token>"
+matrixctl whoami                                  # JSON on stdout, exit 0 = ok
+matrixctl create-topic-room "Topic" --invite zach --topic "..." --encrypted
+matrixctl send "!room:id" "message"               # see Commands for the full set
+```
+
 A small non-interactive CLI for automating [Matrix](https://matrix.org) via the
 Client-Server API. Designed to be simple enough for an agent to call as a tool:
 it returns JSON on stdout, prints errors to stderr, and exits non-zero on
@@ -7,7 +15,18 @@ failure.
 
 ## Install
 
-Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
+Requires [uv](https://docs.astral.sh/uv/) (Python 3.10+).
+
+Install the `matrixctl` command globally, straight from the repo:
+
+```bash
+uv tool install git+https://github.com/muellerzr/matrix-ctl
+```
+
+This puts a `matrixctl` executable on your `PATH` (usually `~/.local/bin`).
+Upgrade later with `uv tool upgrade matrixctl`.
+
+### Local / development install
 
 ```bash
 uv venv
@@ -16,6 +35,16 @@ uv pip install -e .
 
 This installs the `matrixctl` console script into `.venv/bin/matrixctl`.
 Activate the venv (`source .venv/bin/activate`) or call it directly.
+
+## Using it with Hermes (or any agent)
+
+`matrixctl` is built to be called as an agent tool. Two ready-made pieces:
+
+- [`hermes/matrixctl/SKILL.md`](hermes/matrixctl/SKILL.md) — a drop-in agent
+  skill describing when and how to call `matrixctl` (commands, JSON shapes, exit
+  codes, the encryption rule).
+- [`examples/hermes-config.md`](examples/hermes-config.md) — step-by-step setup:
+  install, environment/credentials, registering the skill, and handling results.
 
 ## Configuration
 
