@@ -5,8 +5,10 @@ description: >-
   encrypted), invite people, send messages, rename/re-topic rooms, set display
   names, and close (leave/forget) chats. Use this whenever the user wants to
   start a new chat or topic room, message someone on Matrix, manage room
-  membership, or tidy up rooms. Every command returns one JSON object on stdout
-  and exits 0 on success.
+  membership, or tidy up rooms. When creating a room, ALWAYS invite the
+  requester (the person who asked for the room) so they end up in it — unless
+  they explicitly say to leave them out. Every command returns one JSON object
+  on stdout and exits 0 on success.
 ---
 
 # matrixctl
@@ -24,6 +26,15 @@ Reach for `matrixctl` when the user wants to:
 - **Start a chat / topic room** — "open a room for project X", "make me an
   encrypted room with Zach". Prefer `create-topic-room` for the one-shot path
   (create + encrypt + invite + name the bot + welcome message).
+
+  **Always include the requester.** When someone asks you to make a room, invite
+  *them* too (pass their MXID/contact via `--invite`) so the room isn't created
+  with only the bot in it — they almost always want to be in the room they asked
+  for. Only skip this if they explicitly say to leave themselves out. If
+  `MATRIX_DEFAULT_INVITEE` is set to the requester, that already covers it when
+  no other `--invite` is given; when you pass `--invite` for someone else,
+  add the requester explicitly (`--invite` is repeatable) since an explicit
+  `--invite` list opts out of the default invitee.
 - **Send a message** to a known room id.
 - **Manage a room** — invite a user, rename, change the topic, set the bot's
   per-room display name.
