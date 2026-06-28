@@ -37,6 +37,22 @@ class ConfigError(Exception):
     """Raised when required configuration (env vars) is missing."""
 
 
+class EncryptedRoomError(Exception):
+    """Raised when asked to plaintext-send into an end-to-end encrypted room.
+
+    matrixctl has no crypto; encrypted message traffic must go through an
+    E2E-capable client (e.g. Hermes's mautrix adapter). Carries the room id.
+    """
+
+    def __init__(self, room_id: str) -> None:
+        self.room_id = room_id
+        super().__init__(
+            f"room {room_id} is end-to-end encrypted and matrixctl cannot "
+            "encrypt messages — send it via Hermes/mautrix, or pass "
+            "--allow-plaintext to send it unencrypted anyway"
+        )
+
+
 def _quote(value: str) -> str:
     """Percent-encode a path segment (room ids, user ids, event types)."""
     return quote(value, safe="")
@@ -212,6 +228,20 @@ class MatrixClient:
         )
         content = {"msgtype": msgtype, "body": body}
         return self._request("PUT", path, json=content)
+
+    def is_room_encrypted(self, room_id: str) -> bool:
+        """True if the room has an ``m.room.encryption`` state event.
+
+        Absence (HTTP 404 / ``M_NOT_FOUND``) means the room is unencrypted;
+        any other error propagates so we never guess wrong about encryption.
+        """
+        try:
+            self.get_state_event(room_id, "m.room.encryption")
+        except MatrixError as exc:
+            if exc.status_code == 404 or exc.errcode == "M_NOT_FOUND":
+                return False
+            raise
+        return True
 
     def leave(self, room_id: str) -> dict[str, Any]:
         path = f"/_matrix/client/v3/rooms/{_quote(room_id)}/leave"
